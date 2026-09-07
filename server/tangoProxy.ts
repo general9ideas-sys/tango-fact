@@ -56,6 +56,39 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body))
 }
 
+function portalApiKey() {
+  return (process.env.PORTAL_API_KEY ?? '').trim()
+}
+
+function headerValue(req: IncomingMessage, name: string) {
+  const raw = req.headers[name.toLowerCase()]
+  if (Array.isArray(raw)) return (raw[0] ?? '').trim()
+  return (raw ?? '').trim()
+}
+
+/** Guazu envía X-Api-Key. El portal web (mismo origen) sigue sin header. */
+function portalAuthorized(req: IncomingMessage) {
+  const expected = portalApiKey()
+  if (!expected) return true
+
+  const key = headerValue(req, 'x-api-key')
+  const auth = headerValue(req, 'authorization')
+  const bearer = auth.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() ?? ''
+  if (key === expected || bearer === expected) return true
+
+  const site = headerValue(req, 'sec-fetch-site')
+  if (site === 'same-origin') return true
+
+  return false
+}
+
+function applyPortalCors(res: ServerResponse) {
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'X-Api-Key, Authorization, Content-Type')
+  res.setHeader('Access-Control-Max-Age', '86400')
+}
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -1079,10 +1112,27 @@ export async function handleTangoApi(
 ): Promise<boolean> {
   const url = req.url ?? ''
   const path = url.split('?')[0]
+  const isPortal = path.startsWith('/api/portal/')
+  if (isPortal) {
+    applyPortalCors(res)
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204
+      res.end()
+      return true
+    }
+  }
   if (path === '/api/portal/health') {
     sendJson(res, 200, {
+      ok: true,
+      authRequired: Boolean(portalApiKey()),
       hasToken: Boolean(nexoToken()),
-      clientes: codigosConocidos(),
+      clientes: portalAuthorized(req) ? codigosConocidos() : undefined,
+    })
+    return true
+  }
+  if (isPortal && !portalAuthorized(req)) {
+    sendJson(res, 401, {
+      error: 'Falta o es inválida la API key. Enviá header X-Api-Key.',
     })
     return true
   }
